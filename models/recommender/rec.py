@@ -118,11 +118,25 @@ def recs_essentials(vector = None, name = None):
 
 def makeup_recommendation(skin_tone, skin_type):
     result = []
+    # Create empty DataFrame
     dff = pd.DataFrame()
-    dff = dff.append(makeup[(makeup['skin tone'] == skin_tone) & (makeup['skin type'] == skin_type) & (makeup['label'] == 'foundation')].head(2))
-    dff = dff.append(makeup[(makeup['skin tone'] == skin_tone) & (makeup['skin type'] == skin_type) & (makeup['label'] == 'concealer')].head(2))
-    dff = dff.append(makeup[(makeup['skin tone'] == skin_tone) & (makeup['skin type'] == skin_type) & (makeup['label'] == 'primer')].head(2))
-    dff= dff.sample(frac = 1)
+    
+    # Get foundation recommendations
+    foundation = makeup[(makeup['skin tone'] == skin_tone) & (makeup['skin type'] == skin_type) & (makeup['label'] == 'foundation')].head(2)
+    
+    # Get concealer recommendations
+    concealer = makeup[(makeup['skin tone'] == skin_tone) & (makeup['skin type'] == skin_type) & (makeup['label'] == 'concealer')].head(2)
+    
+    # Get primer recommendations
+    primer = makeup[(makeup['skin tone'] == skin_tone) & (makeup['skin type'] == skin_type) & (makeup['label'] == 'primer')].head(2)
+    
+    # Combine all recommendations using pd.concat instead of append
+    dff = pd.concat([dff, foundation, concealer, primer], ignore_index=True)
+    
+    # Shuffle the recommendations
+    dff = dff.sample(frac=1)
+    
+    # Convert to dictionary and format response
     data = dff[['brand', 'name', 'price', 'url', 'img', 'skin type', 'skin tone']].to_dict('split')['data']
     for element in data:
         result.append(wrap_makeup(element))
