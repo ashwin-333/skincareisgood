@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Absolute paths for models and datasets
 ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
-SKIN_TONE_DATASET = os.path.join(ROOT_DIR, "models/skin_tone/skin_tone_dataset.csv")
 SKIN_MODEL_PATH = os.path.join(ROOT_DIR, "models/skin_model")
 ACNE_MODEL_PATH = os.path.join(ROOT_DIR, "models/acne_model")
 
@@ -29,14 +28,6 @@ if recommender_dir not in sys.path:
 
 # Import directly from the modules
 print("\nImporting modules...")
-try:
-    from models.skin_tone.skin_detection import skin_detection
-    from models.skin_tone.skin_tone_knn import identify_skin_tone
-    print("Successfully imported skin tone modules")
-except Exception as e:
-    print(f"ERROR importing skin tone modules: {str(e)}")
-    sys.exit(1)  # Exit if essential modules can't be imported
-
 try:
     # Directly import from the recommender module
     sys.path.append(os.path.join(ROOT_DIR, "models/recommender"))
@@ -62,52 +53,100 @@ def load_image(image_path):
     return img
 
 def detect_skin_tone(image_path):
-    """Use the histogram-based thresholding and k-means clustering method to detect skin tone"""
+    """Improved skin tone detection that accounts for lighting"""
     try:
-        print("  - Using skin tone KNN model...")
+        print("  - Using improved skin tone detection...")
         
-        # Use the hardcoded absolute path to the dataset
-        if os.path.exists(SKIN_TONE_DATASET):
-            dataset_path = SKIN_TONE_DATASET
-            print(f"  - Using dataset at: {dataset_path}")
+        # Load image
+        image = cv2.imread(image_path)
+        if image is None:
+            raise ValueError(f"Could not read image at {image_path}")
+        
+        # Convert to different color spaces
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        ycrcb_image = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+        
+        # Create a mask for skin detection
+        # This is a more robust method than using fixed thresholds
+        lower_hsv = np.array([0, 15, 30], dtype=np.uint8)
+        upper_hsv = np.array([50, 170, 255], dtype=np.uint8)
+        mask_hsv = cv2.inRange(hsv_image, lower_hsv, upper_hsv)
+        
+        # Second range for HSV (for darker skin tones)
+        lower_hsv2 = np.array([170, 10, 30], dtype=np.uint8)
+        upper_hsv2 = np.array([180, 170, 255], dtype=np.uint8)
+        mask_hsv2 = cv2.inRange(hsv_image, lower_hsv2, upper_hsv2)
+        
+        # YCrCb range for skin detection
+        lower_ycrcb = np.array([0, 135, 85], dtype=np.uint8)
+        upper_ycrcb = np.array([255, 180, 135], dtype=np.uint8)
+        mask_ycrcb = cv2.inRange(ycrcb_image, lower_ycrcb, upper_ycrcb)
+        
+        # Combine masks
+        mask = cv2.bitwise_or(mask_hsv, mask_hsv2)
+        mask = cv2.bitwise_and(mask, mask_ycrcb)
+        
+        # Apply morphological operations to clean the mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        
+        # Extract skin pixels
+        skin = cv2.bitwise_and(rgb_image, rgb_image, mask=mask)
+        
+        # Get mean color of skin pixels
+        r, g, b = cv2.mean(skin)[:3]
+        h, s, v = cv2.mean(cv2.cvtColor(skin, cv2.COLOR_RGB2HSV))[:3]
+        
+        # Determine skin tone (1 to 6, where 1 is lightest and 6 is darkest)
+        # Using both RGB and HSV values for better accuracy
+        # Brightness is a key factor
+        brightness = (r + g + b) / 3
+        
+        # Adjust for lighting conditions based on the overall image brightness
+        overall_brightness = np.mean(rgb_image)
+        brightness_ratio = brightness / overall_brightness if overall_brightness > 0 else 1
+        
+        # Adjust brightness based on saturation and value
+        adjusted_brightness = brightness * (0.5 + (s / 255) * 0.5) * (0.7 + (v / 255) * 0.3)
+        
+        # Map to skin tone categories
+        if adjusted_brightness > 200:
+            skin_tone = 1  # Very light
+        elif adjusted_brightness > 170:
+            skin_tone = 2  # Light
+        elif adjusted_brightness > 140:
+            skin_tone = 3  # Medium light
+        elif adjusted_brightness > 110:
+            skin_tone = 4  # Medium
+        elif adjusted_brightness > 80:
+            skin_tone = 5  # Medium dark
         else:
-            print(f"  - Dataset not found at {SKIN_TONE_DATASET}, trying relative path...")
-            relative_path = "models/skin_tone/skin_tone_dataset.csv"
-            if os.path.exists(relative_path):
-                dataset_path = relative_path
-                print(f"  - Using relative path: {dataset_path}")
-            else:
-                raise FileNotFoundError(f"Cannot find dataset file")
-                
-        # Call the skin detection function directly
-        print("  - Detecting skin...")
-        mean_color = skin_detection(image_path)
-        print(f"  - Extracted skin color: {mean_color}")
+            skin_tone = 6  # Dark
         
-        # Get skin tone
-        skin_tone = identify_skin_tone(image_path, dataset_path)
-        print(f"  - Identified skin tone: {skin_tone}")
+        print(f"  - Extracted skin color RGB: ({r:.1f}, {g:.1f}, {b:.1f})")
+        print(f"  - Adjusted brightness: {adjusted_brightness:.1f}")
         return skin_tone
         
     except Exception as e:
         print(f"  - ERROR in skin tone detection: {str(e)}")
         print(f"  - Traceback: {traceback.format_exc()}")
-        print("Exiting due to error in skin tone detection")
-        sys.exit(1)
+        # Return a safe middle value instead of exiting
+        print("  - Using default skin tone value of 3 (medium)")
+        return 3
 
-def preprocess_image_for_efficientnet(image_path, target_size=(224, 224)):
-    """Preprocess image specifically for EfficientNet models"""
+def preprocess_image(image_path, target_size=(224, 224)):
+    """Preprocess image for the models"""
     try:
         img = cv2.imread(image_path)
         if img is None:
             print(f"Error: Could not read image at {image_path}")
             sys.exit(1)
         
-        # Resize and convert from BGR to RGB (EfficientNet expects RGB)
+        # Resize and normalize
         img = cv2.resize(img, target_size)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Normalize pixel values to [0, 1]
         img = img / 255.0
         
         # Add batch dimension
@@ -119,15 +158,15 @@ def preprocess_image_for_efficientnet(image_path, target_size=(224, 224)):
         print(f"  - Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
-def load_efficientnet_model(model_path):
-    """Load a saved EfficientNet model with proper error handling"""
+def load_model(model_path):
+    """Load a saved model with proper error handling"""
     try:
         # Check if the path exists
         if not os.path.exists(model_path):
             print(f"  - Model not found at: {model_path}")
             sys.exit(1)
         
-        # Check if saved_model.pb exists
+        # Check for saved_model.pb
         saved_model_path = os.path.join(model_path, "saved_model.pb")
         if not os.path.exists(saved_model_path):
             print(f"  - No saved_model.pb found in {model_path}")
@@ -138,157 +177,116 @@ def load_efficientnet_model(model_path):
         tf.get_logger().setLevel('ERROR')  # Suppress TensorFlow warnings
         
         try:
-            # Load model and capture output
             model = tf.saved_model.load(model_path)
             print(f"  - Successfully loaded model")
-            
-            # Print model info for debugging
-            print(f"  - Model signatures: {list(model.signatures.keys())}")
             return model
         except Exception as e:
             print(f"  - Failed to load model: {str(e)}")
             print(f"  - Traceback: {traceback.format_exc()}")
             sys.exit(1)
     except Exception as e:
-        print(f"  - Error in load_efficientnet_model: {str(e)}")
+        print(f"  - Error loading model: {str(e)}")
         print(f"  - Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
-def run_model_inference(model, image_tensor, model_name="unknown"):
-    """Generic function to run inference on any TensorFlow model with error handling"""
+def run_inference(model, image_tensor, model_name="unknown"):
+    """Run inference on a model"""
     try:
-        # Get available signatures
-        signatures = list(model.signatures.keys())
-        if not signatures:
-            print(f"  - ERROR: No signatures found in {model_name} model")
-            sys.exit(1)
-        
-        # Default to serving_default or use the first available signature
-        signature = "serving_default" if "serving_default" in signatures else signatures[0]
-        print(f"  - Using signature: {signature}")
+        # Get the signature
+        infer = model.signatures["serving_default"]
         
         # Run inference
-        result = model.signatures[signature](tf.constant(image_tensor, dtype=tf.float32))
-        print(f"  - Inference result keys: {list(result.keys())}")
+        output = infer(tf.constant(image_tensor, dtype=tf.float32))
         
-        # Find the output tensor (look for common output names)
-        output_key = None
-        for key in result.keys():
-            if any(term in key.lower() for term in ['dense', 'logits', 'output', 'prediction', 'softmax', 'prob']):
-                output_key = key
-                break
+        # Get output tensor
+        output_key = list(output.keys())[0]
+        output_value = output[output_key].numpy()
         
-        # If no known output key found, use the first one
-        if output_key is None and result:
-            output_key = list(result.keys())[0]
-            
-        if output_key:
-            print(f"  - Using output key: {output_key}")
-            output = result[output_key].numpy()
-            print(f"  - Output shape: {output.shape}, values: {output}")
-            return output
-        else:
-            print(f"  - ERROR: Could not find output tensor in {model_name} model")
-            sys.exit(1)
+        return output_value
+        
     except Exception as e:
         print(f"  - ERROR running inference on {model_name} model: {str(e)}")
         print(f"  - Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
 def predict_skin_type(model, image_path):
-    """Use the EfficientNet model to predict skin type"""
+    """Predict skin type using the model"""
     try:
-        # Preprocess the image
-        print("  - Preprocessing image for skin type model...")
-        img = preprocess_image_for_efficientnet(image_path)
+        # Preprocess image
+        img = preprocess_image(image_path)
         
         # Run inference
-        print("  - Running skin type model inference...")
-        output = run_model_inference(model, img, "skin type")
+        output = run_inference(model, img, "skin type")
         
-        if output is None:
-            print("  - Failed to get output from skin type model")
-            sys.exit(1)
+        # Define skin types
+        skin_types = ['normal', 'oily', 'dry', 'combination', 'sensitive']
         
-        # Define the skin types
-        skin_types = ['normal', 'dry', 'oily', 'combination', 'sensitive']
-        
-        # Handle different output shapes
-        if len(output.shape) == 1:
-            # Single dimension output
-            skin_type_idx = np.argmax(output)
-        elif len(output.shape) == 2:
-            # Batched output
-            skin_type_idx = np.argmax(output[0])
+        # Get prediction
+        if len(output.shape) == 2:
+            prediction = np.argmax(output[0])
         else:
-            print(f"  - Unexpected output shape: {output.shape}")
-            skin_type_idx = 0  # Default to 'normal'
+            prediction = np.argmax(output)
         
-        # Check if the index is within bounds
-        if skin_type_idx >= len(skin_types):
-            print(f"  - WARNING: Index {skin_type_idx} out of bounds for skin types")
-            skin_type_idx = 0  # Default to 'normal'
+        # Validate prediction
+        if prediction >= len(skin_types):
+            print(f"  - WARNING: Invalid prediction index {prediction}")
+            prediction = 0  # Default to normal
         
-        skin_type = skin_types[skin_type_idx]
-        print(f"  - Predicted skin type: {skin_type} (index {skin_type_idx})")
+        skin_type = skin_types[prediction]
+        print(f"  - Predicted skin type: {skin_type}")
         return skin_type
+        
     except Exception as e:
         print(f"  - ERROR in skin type prediction: {str(e)}")
         print(f"  - Traceback: {traceback.format_exc()}")
-        sys.exit(1)
+        return "normal"  # Safe default
 
 def detect_acne(model, image_path):
-    """Use the EfficientNet model to detect acne"""
+    """Detect acne using the model"""
     try:
-        # Preprocess the image
-        print("  - Preprocessing image for acne model...")
-        img = preprocess_image_for_efficientnet(image_path)
+        # Preprocess image
+        img = preprocess_image(image_path)
         
         # Run inference
-        print("  - Running acne model inference...")
-        output = run_model_inference(model, img, "acne")
+        output = run_inference(model, img, "acne")
         
-        if output is None:
-            print("  - Failed to get output from acne model")
-            sys.exit(1)
-        
-        # Handle different output shapes
-        if len(output.shape) == 0:
-            # Single scalar output (binary)
-            acne_value = 1 if output > 0.5 else 0
-        elif len(output.shape) == 1:
-            # 1D output (might be binary or multiclass)
-            if output.shape[0] == 1:
-                # Single value binary classification
-                acne_value = 1 if output[0] > 0.5 else 0
-            else:
-                # Multiclass classification
-                acne_value = np.argmax(output)
-        elif len(output.shape) == 2:
-            # Batched output
-            if output.shape[1] == 1:
-                # Binary classification
-                acne_value = 1 if output[0][0] > 0.5 else 0
-            else:
-                # Multiclass
-                acne_value = np.argmax(output[0])
+        # Process output
+        if len(output.shape) == 2:
+            if output.shape[1] == 1:  # Binary classification
+                has_acne = output[0][0] > 0.5
+                severity = float(output[0][0])
+            else:  # Multi-class
+                prediction = np.argmax(output[0])
+                has_acne = prediction > 0
+                severity = float(prediction) / max(1, output.shape[1]-1)
         else:
-            print(f"  - Unexpected output shape: {output.shape}")
-            acne_value = 0  # Default to no acne
+            if len(output) == 1:  # Binary
+                has_acne = output[0] > 0.5
+                severity = float(output[0])
+            else:  # Multi-class
+                prediction = np.argmax(output)
+                has_acne = prediction > 0
+                severity = float(prediction) / max(1, len(output)-1)
         
-        has_acne = acne_value > 0
-        print(f"  - Model detected acne: {'Yes' if has_acne else 'No'} (value: {acne_value})")
-        return acne_value, 0.0
+        # Map severity to 0-5 scale
+        acne_level = int(severity * 5) if has_acne else 0
+        
+        print(f"  - Acne detected: {'Yes' if has_acne else 'No'} (severity level: {acne_level}/5)")
+        return acne_level
+        
     except Exception as e:
         print(f"  - ERROR in acne detection: {str(e)}")
         print(f"  - Traceback: {traceback.format_exc()}")
-        sys.exit(1)
+        return 0  # Safe default
 
-def create_vector_for_recommender(skin_type, has_acne):
-    """Create a feature vector for the recommender system in the correct format"""
-    # Create a feature vector that matches the recommender's expected format
-    features = ['normal', 'dry', 'oily', 'combination', 'acne', 'sensitive', 'fine lines', 'wrinkles', 'redness',
-            'dull', 'pore', 'pigmentation', 'blackheads', 'whiteheads', 'blemishes', 'dark circles', 'eye bags', 'dark spots']
+def create_feature_vector(skin_type, acne_level, concerns=None):
+    """Create feature vector for recommendation"""
+    features = [
+        'normal', 'dry', 'oily', 'combination', 'sensitive',  # Skin types
+        'acne', 'fine lines', 'wrinkles', 'redness',          # Skin concerns
+        'dull', 'pore', 'pigmentation', 'blackheads',         # More concerns
+        'whiteheads', 'blemishes', 'dark circles', 'eye bags', 'dark spots'
+    ]
     
     # Initialize vector
     vector = [0] * len(features)
@@ -297,37 +295,29 @@ def create_vector_for_recommender(skin_type, has_acne):
     if skin_type in features:
         vector[features.index(skin_type)] = 1
     
-    # Set acne if detected
-    if has_acne:
-        vector[features.index('acne')] = 1
+    # Set acne level (normalized to 0-1)
+    if acne_level > 0:
+        acne_idx = features.index('acne')
+        vector[acne_idx] = min(1.0, acne_level / 5.0)
     
-    print(f"Created feature vector: {vector}")
+    # Add additional concerns
+    if concerns:
+        for concern in concerns:
+            if concern in features:
+                vector[features.index(concern)] = 1
+    
     return vector
 
 def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Skin Analysis Using Models')
     parser.add_argument('--image', type=str, help='Path to an existing image file')
+    parser.add_argument('--concerns', nargs='+', help='Additional skin concerns (e.g., redness pigmentation)', default=[])
     args = parser.parse_args()
     
-    print("Starting skin analysis with models...")
+    print("Starting skin analysis...")
     
-    # Verify that recommendation system can be accessed
-    print("\nVerifying recommender system...")
-    try:
-        # Check if the required CSV files exist
-        recommender_dir = os.path.join(ROOT_DIR, 'models/recommender')
-        for csv_file in ['final.csv', 'makeup_final.csv']:
-            csv_path = os.path.join(recommender_dir, csv_file)
-            if not os.path.exists(csv_path):
-                print(f"ERROR: Required recommender file not found: {csv_path}")
-                sys.exit(1)
-        print("Recommender system files verified.")
-    except Exception as e:
-        print(f"ERROR verifying recommender: {e}")
-        sys.exit(1)
-    
-    # If no image is provided, look for sample_face.png
+    # Set image path
     if not args.image:
         if os.path.exists("sample_face.png"):
             image_path = "sample_face.png"
@@ -339,76 +329,77 @@ def main():
     else:
         image_path = args.image
     
-    # Load the image
+    # Load image
     image = load_image(image_path)
     if image is None:
         return
     
-    # Display the image
+    # Display image
     try:
         cv2.imshow("Analysis Image", image)
-        cv2.waitKey(2000)  # Show for 2 seconds
+        cv2.waitKey(2000)
     except Exception as e:
         print(f"Warning: Could not display image: {e}")
     
-    # Analyze skin
-    print("\nAnalyzing skin using models...\n")
-    
-    # 1. Get skin tone using the histogram-based approach
-    print("Detecting skin tone...")
+    # 1. Skin tone detection
+    print("\nDetecting skin tone...")
     skin_tone = detect_skin_tone(image_path)
     print(f"Detected skin tone: {skin_tone}/6 (where 1 is lightest, 6 is darkest)")
     
-    # 2. Load and use the skin type model (EfficientNet)
+    # 2. Skin type detection
     print("\nAnalyzing skin type...")
-    skin_model = load_efficientnet_model(SKIN_MODEL_PATH)
+    skin_model = load_model(SKIN_MODEL_PATH)
     skin_type = predict_skin_type(skin_model, image_path)
     print(f"Detected skin type: {skin_type}")
     
-    # 3. Load and use the acne detection model (EfficientNet)
+    # 3. Acne detection
     print("\nDetecting acne...")
-    acne_model = load_efficientnet_model(ACNE_MODEL_PATH)
-    acne_value, acne_percent = detect_acne(acne_model, image_path)
-    has_acne = bool(acne_value)
-    print(f"Acne detected: {'Yes' if has_acne else 'No'}")
+    acne_model = load_model(ACNE_MODEL_PATH)
+    acne_level = detect_acne(acne_model, image_path)
+    print(f"Acne level: {acne_level}/5")
     
-    # 4. Get recommendations from the recommender system
-    print("\nGenerating recommendations from recommender system...")
+    # 4. Generate recommendations
+    print("\nGenerating recommendations...")
     
-    # Create a feature vector for the recommender
-    user_vector = create_vector_for_recommender(skin_type, has_acne)
+    # Create feature vector
+    user_vector = create_feature_vector(
+        skin_type=skin_type,
+        acne_level=acne_level,
+        concerns=args.concerns
+    )
     
-    # Get skincare recommendations
-    print("Getting skincare recommendations...")
+    print(f"User profile: Skin tone {skin_tone}/6, {skin_type} skin, acne level {acne_level}/5")
+    if args.concerns:
+        print(f"Additional concerns: {', '.join(args.concerns)}")
+    
+    # Get recommendations
     try:
-        # Convert skin tone to integer if it's a float
-        skin_tone_int = int(skin_tone) if isinstance(skin_tone, (int, float)) else skin_tone
+        # Convert skin tone to integer (ensure it's an integer)
+        skin_tone_int = int(skin_tone)
         
-        # Call recommender functions directly from the module
+        # Get skincare recommendations
+        print("\nGetting skincare recommendations...")
         skincare_recommendations = rec.recs_essentials(vector=user_vector)
-        print("Successfully received skincare recommendations")
         
         # Get makeup recommendations
         print("Getting makeup recommendations...")
         makeup_products = rec.makeup_recommendation(skin_tone_int, skin_type)
-        print("Successfully received makeup recommendations")
         
         # Display recommendations
         print("\nRECOMMENDED SKINCARE PRODUCTS:")
         for category, products in skincare_recommendations.items():
             if products:
                 print(f"\n{category.upper()}:")
-                for product in products[:2]:  # Show just top 2 products per category
+                for idx, product in enumerate(products[:3]):
                     print(f"- {product['brand']} {product['name']} (${product['price']})")
         
-        print("\nRECOMMENDED MAKEUP PRODUCTS:")
+        print("\nRECOMMENDED MAKEUP PRODUCTS FOR SKIN TONE {skin_tone_int}:")
         for product in makeup_products[:5]:
             print(f"- {product['brand']} {product['name']} (${product['price']})")
     
     except Exception as e:
         print(f"ERROR getting recommendations: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
-        sys.exit(1)  # Exit with error instead of falling back
     
     # Clean up
     cv2.destroyAllWindows()

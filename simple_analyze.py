@@ -3,7 +3,25 @@ import numpy as np
 import os
 import argparse
 import random
+import sys
 from pathlib import Path
+
+# Add root dir to sys.path for module imports
+ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+sys.path.insert(0, ROOT_DIR)
+
+# Add the recommender directory to sys.path
+recommender_dir = os.path.join(ROOT_DIR, "models/recommender")
+if recommender_dir not in sys.path:
+    sys.path.append(recommender_dir)
+
+# Import the recommendation module
+try:
+    import models.recommender.rec as rec
+    print("Successfully imported recommendation modules")
+except Exception as e:
+    print(f"ERROR importing recommendation modules: {str(e)}")
+    # We'll use fallback recommendations if import fails
 
 # Skin tone labels
 SKIN_TONES = [1, 2, 3, 4, 5, 6]
@@ -119,13 +137,78 @@ def detect_acne(image):
     # Calculate percentage of pixels that are in the red range
     red_pixel_percent = np.sum(red_mask > 0) / (face_region.shape[0] * face_region.shape[1])
     
-    # If more than 5% of pixels are reddish, consider it as having acne
-    has_acne = red_pixel_percent > 0.05
+    # ADJUSTED: Use 8% as the threshold for acne detection
+    has_acne = red_pixel_percent > 0.08
     
     return has_acne, red_pixel_percent
 
-def get_skincare_recommendations(skin_type, has_acne):
-    """Return skincare product recommendations based on analysis"""
+def create_feature_vector(skin_type, has_acne, acne_percent=0, concerns=None):
+    """Create a feature vector for the recommendation system"""
+    # Features used by the recommender
+    features = ['normal', 'dry', 'oily', 'combination', 'acne', 'sensitive', 'fine lines', 'wrinkles', 'redness',
+               'dull', 'pore', 'pigmentation', 'blackheads', 'whiteheads', 'blemishes', 'dark circles', 'eye bags', 'dark spots']
+    
+    # Initialize vector
+    vector = [0] * len(features)
+    
+    # Set skin type
+    if skin_type in features:
+        vector[features.index(skin_type)] = 1
+    
+    # Set acne and calculate severity (scale 0-1 based on redness percentage)
+    if has_acne:
+        acne_idx = features.index('acne')
+        # Normalize acne percentage to a scale of 0-1 for severity
+        acne_severity = min(1.0, acne_percent * 5)  # Cap at 1.0
+        vector[acne_idx] = acne_severity
+
+    # Add additional concerns if provided
+    if concerns:
+        for concern in concerns:
+            if concern in features:
+                vector[features.index(concern)] = 1
+    
+    return vector
+
+def get_recommendations_from_model(skin_type, skin_tone, has_acne, acne_percent, concerns=None):
+    """Get recommendations from the recommendation model"""
+    try:
+        # Create feature vector
+        user_vector = create_feature_vector(
+            skin_type=skin_type,
+            has_acne=has_acne,
+            acne_percent=acne_percent,
+            concerns=concerns
+        )
+        
+        # Get skincare recommendations
+        print("\nGetting personalized skincare recommendations...")
+        skincare_recommendations = rec.recs_essentials(vector=user_vector)
+        
+        # Get makeup recommendations
+        print("Getting personalized makeup recommendations...")
+        makeup_products = rec.makeup_recommendation(skin_tone, skin_type)
+        
+        # Display skincare recommendations
+        print("\nRECOMMENDED SKINCARE PRODUCTS:")
+        for category, products in skincare_recommendations.items():
+            if products:
+                print(f"\n{category.upper()}:")
+                for product in products[:3]:  # Show top 3 products per category
+                    print(f"- {product['brand']} {product['name']} (${product['price']})")
+        
+        # Display makeup recommendations
+        print("\nRECOMMENDED MAKEUP PRODUCTS:")
+        for product in makeup_products[:5]:  # Show top 5 makeup products
+            print(f"- {product['brand']} {product['name']} (${product['price']})")
+        
+        return True
+    except Exception as e:
+        print(f"Error getting recommendations from model: {str(e)}")
+        return False
+
+def get_fallback_skincare_recommendations(skin_type, has_acne):
+    """Fallback skincare product recommendations if model fails"""
     print("\nRECOMMENDED SKINCARE PRODUCTS:")
     
     # Cleansers
@@ -170,8 +253,8 @@ def get_skincare_recommendations(skin_type, has_acne):
         print("- Drunk Elephant C-Firma Vitamin C Day Serum ($80)")
         print("- The Ordinary Buffet ($15)")
 
-def get_makeup_recommendations(skin_tone, skin_type):
-    """Return makeup product recommendations based on analysis"""
+def get_fallback_makeup_recommendations(skin_tone, skin_type):
+    """Fallback makeup product recommendations if model fails"""
     print("\nRECOMMENDED MAKEUP PRODUCTS:")
     
     # Foundation
@@ -207,20 +290,21 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Simple Skin Analysis and Product Recommendation')
     parser.add_argument('--image', type=str, help='Path to an existing image file')
+    parser.add_argument('--concerns', nargs='+', help='Additional skin concerns (e.g., redness pigmentation)', default=[])
     args = parser.parse_args()
     
     print("Starting simplified skin analysis system...")
     
-    # If no image is provided, look for sample_face.jpg
+    # If no image is provided, look for sample images
     if not args.image:
-        if os.path.exists("sample_face.png"):
-            image_path = "sample_face.png"
-            print(f"No image provided, using sample image: {image_path}")
+        for sample_file in ["sample_face.png", "gone.png", "me.png", "suhas1.png"]:
+            if os.path.exists(sample_file):
+                image_path = sample_file
+                print(f"No image provided, using sample image: {image_path}")
+                break
         else:
-            print("ERROR: No image provided and sample_face.png not found.")
-            print("Please either:")
-            print("1. Create a sample image with: python create_test_image.py")
-            print("2. Provide an image path with: python simple_analyze.py --image path/to/image.png")
+            print("ERROR: No image provided and no sample images found.")
+            print("Please provide an image with: python simple_analyze.py --image path/to/image.png")
             return
     else:
         image_path = args.image
@@ -248,13 +332,20 @@ def main():
     skin_type = analyze_skin_type(image)
     print(f"Detected skin type: {skin_type}")
     
-    # Check for acne
+    # Check for acne (using 8% threshold)
     has_acne, acne_percent = detect_acne(image)
     print(f"Acne detected: {'Yes' if has_acne else 'No'} ({acne_percent*100:.1f}% redness)")
     
-    # Get product recommendations
-    get_skincare_recommendations(skin_type, has_acne)
-    get_makeup_recommendations(skin_tone, skin_type)
+    # Show additional concerns if provided
+    if args.concerns:
+        print(f"Additional concerns: {', '.join(args.concerns)}")
+    
+    # Try to get recommendations from model
+    if not get_recommendations_from_model(skin_type, skin_tone, has_acne, acne_percent, args.concerns):
+        print("\nUsing fallback recommendations:")
+        # Use fallback recommendations if model fails
+        get_fallback_skincare_recommendations(skin_type, has_acne)
+        get_fallback_makeup_recommendations(skin_tone, skin_type)
     
     # Clean up
     cv2.destroyAllWindows()
